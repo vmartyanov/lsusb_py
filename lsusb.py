@@ -1,12 +1,72 @@
 """Script to list USB devices and track list modifications."""
+import os
 import sys
 import time
 
+import requests
+
 from ctypes import *
+
+from dateutil.parser import parse as parsedate
 
 from defines import *
 
+VIDPID = {}
+
 SetupAPI = WinDLL('SetupAPI', use_last_error=True)
+
+def load_ids() -> None:
+    """Load IDs from internet."""
+    print ("Loading USB IDs...")
+    url = "http://www.linux-usb.org/usb.ids"
+    file_name = "usb.ids"
+    local_ts = 0
+
+    if os.path.exists(file_name):
+        local_ts = int(os.path.getmtime(file_name))
+
+    r = requests.head(url)
+    remote_ts = int(parsedate(r.headers['last-modified']).astimezone().timestamp())
+    if local_ts < remote_ts:
+        r = requests.get(url)
+        if r.status_code != 200:
+            print ("Error downloading USB IDs!")
+        else:
+            with open(file_name, "wb") as file:
+                file.write(r.content)
+
+    pids = {}
+    vid = None
+    vid_name = ""
+    with open(file_name, "r") as file:
+        for line in file:
+            line = line.rstrip()
+            if line == "# List of known device classes, subclasses and protocols":
+                break   #end of IDs
+            if line.startswith("#"):
+                continue
+            if line.startswith("\t\t"):
+                continue
+            if not line:
+                continue
+
+            if line.startswith("\t"):
+                pid = int(line[1 : 6], 0x10)
+                descr = line[7:]
+                pids[pid] = descr
+            else:
+                new_vid = int(line[:4], 0x10)
+                if vid is not None:
+                    VIDPID[vid] = {"name" : vid_name, "pids": pids}
+                vid_name = line[6:]
+                pids = {}
+                vid = new_vid
+
+        #and the last element
+        if vid is not None:
+            VIDPID[vid] = {"name" : vid_name, "pids": pids}
+       
+    print ("USB IDs loaded")
 
 def usage() -> None:
     """Print usage information."""
@@ -14,8 +74,15 @@ def usage() -> None:
 
 def print_devices(vidpids: list[tuple[int, int]]) -> None:
     """PPrint devices list"""
+    
     for vid, pid in vidpids:
-        print (f"{vid:04x}:{pid:04x}")
+        descr = ""
+        vid_info = VIDPID.get(vid)
+        if vid_info:
+            descr = vid_info["name"]
+            pid_info = vid_info["pids"].get(pid, "Unknown device")
+            descr += ", " + pid_info
+        print (f"{vid:04x}:{pid:04x} {descr}")
 
 def print_diff(old: list[tuple[int, int]], new: list[tuple[int, int]]) -> None:
     """Print diff between device lists"""
@@ -125,9 +192,10 @@ def main() -> None:
         else:
             usage()
             return
+    
+    load_ids()
 
     prev_list = get_dev_list()
-
     print ("Installed devices:")
     print_devices(prev_list)
 
